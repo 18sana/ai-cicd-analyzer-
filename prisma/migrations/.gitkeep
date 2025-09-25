@@ -1,0 +1,3 @@
+-- FlowPilot initial migration placeholder.
+-- Run: npx prisma migrate dev --name init
+-- For Docker quickstart: prisma db push is used in README.
