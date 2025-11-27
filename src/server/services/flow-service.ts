@@ -53,7 +53,86 @@ export async function createProject(userId: string, input: { name: string; descr
 }
 
 export async function getProject(userId: string, projectId: string) {
-  return assertProjectAccess(userId, projectId);
+  const ok = await assertProjectAccess(userId, projectId);
+  if (!ok) return null;
+  return prisma.project.findFirst({
+    where: { id: projectId },
+    include: {
+      members: {
+        include: {
+          user: {
+            select: { id: true, name: true, email: true, image: true },
+          },
+        },
+        orderBy: { joinedAt: "asc" },
+      },
+    },
+  });
+}
+
+export async function addProjectMember(
+  userId: string,
+  projectId: string,
+  email: string,
+) {
+  const project = await prisma.project.findFirst({
+    where: {
+      id: projectId,
+      OR: [{ ownerId: userId }, { members: { some: { userId, role: "owner" } } }],
+    },
+  });
+  if (!project) {
+    throw new Error("UNAUTHORIZED");
+  }
+
+  const userToAdd = await prisma.user.findUnique({
+    where: { email: email.toLowerCase() },
+  });
+  if (!userToAdd) {
+    throw new Error("USER_NOT_FOUND");
+  }
+
+  const existingMember = await prisma.projectMember.findUnique({
+    where: {
+      projectId_userId: {
+        projectId,
+        userId: userToAdd.id,
+      },
+    },
+  });
+  if (existingMember) {
+    throw new Error("ALREADY_MEMBER");
+  }
+
+  const member = await prisma.projectMember.create({
+    data: {
+      projectId,
+      userId: userToAdd.id,
+      role: "member",
+    },
+    include: {
+      user: { select: { id: true, name: true, email: true, image: true } },
+    },
+  });
+
+  await prisma.activityLog.create({
+    data: {
+      action: ActivityAction.MEMBER_ADDED,
+      message: `Added ${userToAdd.name ?? userToAdd.email} as a collaborator`,
+      userId,
+      projectId,
+    },
+  });
+
+  await prisma.notification.create({
+    data: {
+      userId: userToAdd.id,
+      title: "Added to project",
+      body: `You have been added as a collaborator to the project "${project.name}".`,
+    },
+  });
+
+  return member;
 }
 
 export async function updateProject(
