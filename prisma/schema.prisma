@@ -30,7 +30,7 @@ enum ActivityAction {
   MEMBER_ADDED
 }
 
-model User {
+modl User {
   id            String    @id @default(cuid())
   email         String    @unique
   name          String?
