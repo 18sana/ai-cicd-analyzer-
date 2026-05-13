@@ -1,6 +1,5 @@
 import { auth } from "@/auth";
 import { ButtonLink } from "@/components/ui/button-link";
-import { NonExistentComponent } from "@/components/does-not-exist"; // This will cause a build failure
 
 export default async function HomePage() {
   const session = await auth();
