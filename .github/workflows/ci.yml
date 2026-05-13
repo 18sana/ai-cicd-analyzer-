@@ -1,0 +1,268 @@
+# =============================================================================
+# FlowPilot CI — quality gates + AI incident routing (n8n webhook)
+# =============================================================================
+#
+# Why use continue-on-error on individual checks?
+# - Lets every independent step run even after an earlier failure (e.g. still
+#   run ESLint + tests + build so you see *all* failures in one run).
+# - The job still ends FAILED via the final "Finalize CI / notify n8n" step,
+#   which exits non‑zero if any gate failed — preserving the red CI signal.
+#
+# How logs are captured:
+# - Each gate pipes stdout/stderr through `tee` into ci-logs/<step>.log so we
+#   retain output even when the command fails (exit codes != 0).
+#
+# Why send a webhook payload?
+# - External automation (n8n) can summarize logs, open tickets, page on-call,
+#   or run LLM analysis without granting CI full repo credentials.
+#
+# How n8n fits:
+# - Configure a Webhook node (POST) in n8n; paste its URL into GitHub secret
+#   N8N_WEBHOOK_URL. This workflow POSTs a JSON document on failure only.
+#
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: read
+
+env:
+  DATABASE_URL: postgresql://flowpilot:flowpilot@localhost:5432/flowpilot_test
+  NEXTAUTH_SECRET: ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci-ci
+  NEXTAUTH_URL: http://localhost:3000
+  NEXT_PUBLIC_APP_URL: http://localhost:3000
+  SKIP_ENV_VALIDATION: "0"
+  # Maximum characters for combined logs in webhook JSON (keep requests safe / small).
+  CI_LOG_MAX_CHARS: "120000"
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: flowpilot
+          POSTGRES_PASSWORD: flowpilot
+          POSTGRES_DB: flowpilot_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U flowpilot -d flowpilot_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Prepare log directory
+        run: mkdir -p ci-logs
+
+      # --- Dependency install (hard prerequisite for everything below) ----------
+      - name: Install dependencies
+        id: install
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm ci 2>&1 | tee ci-logs/install.log
+
+      # --- Database schema (Prisma) ---------------------------------------------
+      - name: Prisma generate + push schema
+        id: prisma
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npx prisma generate && npx prisma db push 2>&1 | tee ci-logs/prisma.log
+
+      # --- Quality gates (all run even if a prior gate failed) ------------------
+      - name: TypeScript type check
+        id: typecheck
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run typecheck 2>&1 | tee ci-logs/typecheck.log
+
+      - name: ESLint
+        id: eslint
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run lint 2>&1 | tee ci-logs/eslint.log
+
+      - name: Unit tests
+        id: unit_tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run test 2>&1 | tee ci-logs/unit_tests.log
+
+      - name: Build project
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          npm run build 2>&1 | tee ci-logs/build.log
+
+      # --- Failures: aggregate outcomes, notify n8n, preserve failed job ----------
+      - name: Finalize CI — notify n8n on failure and enforce exit code
+        if: always()
+        shell: bash
+        env:
+          N8N_WEBHOOK_URL: ${{ secrets.N8N_WEBHOOK_URL }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_REF_NAME: ${{ github.ref_name }}
+          GH_HEAD_REF: ${{ github.head_ref }}
+          GH_SHA: ${{ github.sha }}
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          GH_ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          EVENT_NAME: ${{ github.event_name }}
+          INSTALL_OUTCOME: ${{ steps.install.outcome }}
+          PRISMA_OUTCOME: ${{ steps.prisma.outcome }}
+          TYPECHECK_OUTCOME: ${{ steps.typecheck.outcome }}
+          ESLINT_OUTCOME: ${{ steps.eslint.outcome }}
+          UNIT_TESTS_OUTCOME: ${{ steps.unit_tests.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+        run: |
+          set -uo pipefail
+
+          BRANCH="${GH_HEAD_REF:-$GH_REF_NAME}"
+          RUN_URL="${GITHUB_SERVER_URL}/${GH_REPOSITORY}/actions/runs/${GH_RUN_ID}"
+          if [ -n "${GH_RUN_ATTEMPT:-}" ] && [ "${GH_RUN_ATTEMPT}" != "1" ]; then
+            RUN_URL="${RUN_URL}?attempt=${GH_RUN_ATTEMPT}"
+          fi
+
+          COMMIT_MESSAGE="$(git log -1 --pretty=%B 2>/dev/null | head -c 4000 || true)"
+          COMMIT_AUTHOR="$(git log -1 --pretty=%an 2>/dev/null || echo "$GH_ACTOR")"
+
+          PR_NUM=""
+          PR_LINK=""
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            PR_NUM="${PR_NUMBER:-}"
+            PR_LINK="${PR_HTML_URL:-}"
+          fi
+
+          declare -A OUTCOMES=(
+            [install]="$INSTALL_OUTCOME"
+            [prisma]="$PRISMA_OUTCOME"
+            [typecheck]="$TYPECHECK_OUTCOME"
+            [eslint]="$ESLINT_OUTCOME"
+            [unit_tests]="$UNIT_TESTS_OUTCOME"
+            [build]="$BUILD_OUTCOME"
+          )
+
+          FAILED_STEPS=()
+          for key in install prisma typecheck eslint unit_tests build; do
+            if [ "${OUTCOMES[$key]}" != "success" ]; then
+              FAILED_STEPS+=("$key")
+            fi
+          done
+
+          if [ "${#FAILED_STEPS[@]}" -eq 0 ]; then
+            echo "All CI gates passed."
+            exit 0
+          fi
+
+          FAILED_STEP_NAMES=$(IFS=','; echo "${FAILED_STEPS[*]}")
+
+          # Build logs: prefix each failed step's log file for clarity; truncate safely.
+          LOGS_RAW=""
+          for step in "${FAILED_STEPS[@]}"; do
+            LOG_FILE="ci-logs/${step}.log"
+            if [ -f "$LOG_FILE" ]; then
+              LOGS_RAW+="===== ${step} ====="$'\n'"$(cat "$LOG_FILE")"$'\n'
+            else
+              LOGS_RAW+="===== ${step} ====="$'\n'"<no log file captured>"$'\n'
+            fi
+          done
+
+          MAX="${CI_LOG_MAX_CHARS:-120000}"
+          if [ "${#LOGS_RAW}" -gt "$MAX" ]; then
+            LOGS_TRIM="${LOGS_RAW:0:$MAX}"
+            LOGS_TRIM+=$'\n\n...[truncated to '"$MAX"' characters for webhook safety]'
+          else
+            LOGS_TRIM="$LOGS_RAW"
+          fi
+
+          TIMESTAMP="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          echo "CI failed steps: ${FAILED_STEP_NAMES}"
+          echo "::error::CI failed on: ${FAILED_STEP_NAMES}"
+
+          if [ -z "${N8N_WEBHOOK_URL:-}" ]; then
+            echo "::warning::N8N_WEBHOOK_URL is not set — skipping n8n webhook (set repository secret to enable)."
+          else
+            PAYLOAD_FILE="$(mktemp)"
+            if ! jq -n \
+              --arg repository "$GH_REPOSITORY" \
+              --arg branch "$BRANCH" \
+              --arg commit_sha "$GH_SHA" \
+              --arg commit_message "$COMMIT_MESSAGE" \
+              --arg author "$COMMIT_AUTHOR" \
+              --arg pr_number "${PR_NUM:-}" \
+              --arg pr_url "${PR_LINK:-}" \
+              --arg run_url "$RUN_URL" \
+              --arg timestamp "$TIMESTAMP" \
+              --arg failed_step "$FAILED_STEP_NAMES" \
+              --arg logs "$LOGS_TRIM" \
+              '{
+                repository: $repository,
+                branch: $branch,
+                commit_sha: $commit_sha,
+                commit_message: $commit_message,
+                author: $author,
+                pr_number: $pr_number,
+                pr_url: $pr_url,
+                run_url: $run_url,
+                timestamp: $timestamp,
+                failed_step: $failed_step,
+                logs: $logs
+              }' >"$PAYLOAD_FILE" 2>/tmp/jq_err.txt; then
+              echo "::warning::Failed to build JSON payload with jq; skipping webhook."
+              cat /tmp/jq_err.txt || true
+            else
+              HTTP_CODE="$(curl -sS -o /tmp/n8n_resp.txt -w "%{http_code}" \
+                -X POST \
+                -H "Content-Type: application/json; charset=utf-8" \
+                --data-binary @"$PAYLOAD_FILE" \
+                "$N8N_WEBHOOK_URL" 2>/dev/null || true)"
+              HTTP_CODE="$(printf '%s' "${HTTP_CODE:-}" | tr -d '\r')"
+              if [ -z "$HTTP_CODE" ] || ! [[ "$HTTP_CODE" =~ ^[0-9]{3}$ ]]; then
+                HTTP_CODE="000"
+              fi
+              if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+                echo "n8n webhook acknowledged with HTTP $HTTP_CODE"
+              else
+                echo "::warning::n8n webhook returned HTTP $HTTP_CODE — keeping CI failed anyway."
+                head -c 2000 /tmp/n8n_resp.txt || true
+              fi
+              rm -f "$PAYLOAD_FILE"
+            fi
+          fi
+
+          # Preserve CI failure state for GitHub Checks / branch protection.
+          exit 1
