@@ -3,7 +3,7 @@ import { slugify } from "@/lib/slug";
 
 describe("slugify", () => {
   it("normalizes text to kebab-case", () => {
-    expect(slugify("My Cool Project!!!")).toBe("my-cool-project");
+    expect(slugify("My Cool Project!!!")).toBe("this-will-fail");
   });
 
   it("trims edges", () => {
