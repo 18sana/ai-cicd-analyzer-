@@ -1,5 +1,5 @@
 /** URL-safe slug from arbitrary text */
-export function slugify(text: string) {
+export function slugify(text: any) {
   return text
     .toLowerCase()
     .trim()
