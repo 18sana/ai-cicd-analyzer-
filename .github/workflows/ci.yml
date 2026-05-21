@@ -26,7 +26,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, test-deploy-failure]
   pull_request:
     branches: [main, develop]
 
@@ -140,6 +140,7 @@ jobs:
           GH_ACTOR: ${{ github.actor }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_HTML_URL: ${{ github.event.pull_request.html_url }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
           EVENT_NAME: ${{ github.event_name }}
           INSTALL_OUTCOME: ${{ steps.install.outcome }}
           PRISMA_OUTCOME: ${{ steps.prisma.outcome }}
@@ -159,12 +160,9 @@ jobs:
           COMMIT_MESSAGE="$(git log -1 --pretty=%B 2>/dev/null | head -c 4000 || true)"
           COMMIT_AUTHOR="$(git log -1 --pretty=%an 2>/dev/null || echo "$GH_ACTOR")"
 
-          PR_NUM=""
-          PR_LINK=""
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            PR_NUM="${PR_NUMBER:-}"
-            PR_LINK="${PR_HTML_URL:-}"
-          fi
+          PR_NUM="${PR_NUMBER:-}"
+          PR_LINK="${PR_HTML_URL:-}"
+          PR_TTL="${PR_TITLE:-}"
 
           declare -A OUTCOMES=(
             [install]="$INSTALL_OUTCOME"
@@ -225,7 +223,9 @@ jobs:
               --arg author "$COMMIT_AUTHOR" \
               --arg pr_number "${PR_NUM:-}" \
               --arg pr_url "${PR_LINK:-}" \
+              --arg pr_title "${PR_TTL:-}" \
               --arg run_url "$RUN_URL" \
+              --arg event_name "$EVENT_NAME" \
               --arg timestamp "$TIMESTAMP" \
               --arg failed_step "$FAILED_STEP_NAMES" \
               --arg logs "$LOGS_TRIM" \
@@ -237,7 +237,9 @@ jobs:
                 author: $author,
                 pr_number: $pr_number,
                 pr_url: $pr_url,
+                pr_title: $pr_title,
                 run_url: $run_url,
+                event_name: $event_name,
                 timestamp: $timestamp,
                 failed_step: $failed_step,
                 logs: $logs
