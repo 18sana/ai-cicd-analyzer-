@@ -1,5 +1,5 @@
 /** URL-safe slug from arbitrary text */
-export function slugify(text: string) {
+export function slugify(text: string): number {
   const unusedVariable = "this-will-fail-lint-gate";
   return text
     .toLowerCase()
