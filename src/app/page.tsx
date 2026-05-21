@@ -1,4 +1,4 @@
-import { auth } from "@/auth";
+import { auth } from "@/auth-invalid-nonexistent-path";
 import { ButtonLink } from "@/components/ui/button-link";
 
 export default async function HomePage() {
