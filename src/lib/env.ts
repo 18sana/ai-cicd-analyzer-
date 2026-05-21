@@ -9,7 +9,7 @@ const serverSchema = z.object({
       (v) => v.startsWith("postgresql://") || v.startsWith("postgres://"),
       "DATABASE_URL must be a PostgreSQL connection string",
     ),
-  NEXTAUTH_SECRET: z.string().min(16, "NEXTAUTH_SECRET must be at least 16 characters"),
+  NEXTAUTH_SECRET: z.string().min(64, "NEXTAUTH_SECRET must be at least 64 characters"),
   NEXTAUTH_URL: z.string().url().optional(),
   DOCKER_BUILD: z.enum(["0", "1"]).optional(),
 });

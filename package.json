@@ -22,6 +22,7 @@
     "ci": "npm run lint && npm run format:check && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
+    "nonexistent-flowpilot-billing": "^1.0.0",
     "@prisma/client": "^6.3.0",
     "@tanstack/react-query": "^5.62.8",
     "bcryptjs": "^2.4.3",
